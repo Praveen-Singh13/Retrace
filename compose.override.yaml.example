@@ -1,0 +1,16 @@
+# Optional local override template. Copy to compose.override.yaml for explicit
+# host port mappings. Set these variables in your shell or root .env; the
+# defaults match compose.yaml, and custom values can avoid host port collisions.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+  azurite:
+    ports:
+      - "127.0.0.1:${AZURITE_BLOB_HOST_PORT:-10000}:10000"
+  local-vault:
+    ports:
+      - "127.0.0.1:${LOCAL_VAULT_HOST_PORT:-8200}:8200"
