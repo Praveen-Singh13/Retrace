@@ -1,0 +1,303 @@
+# CU-01 path-aware quality pipeline.
+# Sources: Repository Conventions sections 8, 9.2, and 13.1; Master Build Guide section 9.
+# Coverage is published from the start. No repository-wide percentage threshold.
+# scripts/validate_contracts.py is owned by Codex CX-01 and is invoked, not defined, here.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      contracts: ${{ steps.filter.outputs.contracts }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+      pnpm_workspace: ${{ steps.filter.outputs.pnpm_workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              files="$(git ls-tree -r --name-only HEAD)"
+            else
+              files="$(git diff --name-only "$before" "${{ github.sha }}")"
+            fi
+          fi
+          printf '%s\n' "$files"
+          classify() {
+            local name="$1"
+            local pattern="$2"
+            if printf '%s\n' "$files" | grep -Eq "$pattern"; then
+              echo "${name}=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${name}=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+          classify backend '^(services/|libs/|pyproject\.toml$|uv\.lock$|ruff\.toml$|pytest\.ini$)'
+          classify frontend '^(web/|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|\.nvmrc$)'
+          classify contracts '^(contracts/|scripts/validate_contracts\.py$)'
+          classify workflow '^\.github/workflows/'
+          if [ -f pnpm-workspace.yaml ]; then
+            echo "pnpm_workspace=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pnpm_workspace=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  lockfiles:
+    name: Lockfile freshness
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check uv.lock
+        run: uv lock --check
+
+      - name: Install pnpm
+        if: needs.changes.outputs.pnpm_workspace == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Setup Node
+        if: needs.changes.outputs.pnpm_workspace == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Check pnpm-lock.yaml
+        if: needs.changes.outputs.pnpm_workspace == 'true'
+        run: pnpm install --frozen-lockfile
+
+  backend-lint:
+    name: Backend lint and format
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  backend-test:
+    name: Backend tests
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Pytest
+        shell: bash
+        run: |
+          set +e
+          uv run pytest
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            echo "pytest collected no tests (exit 5). Passing until service or library tests exist."
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Python coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if uv run python -c "import pytest_cov" >/dev/null 2>&1; then
+            set +e
+            uv run pytest --cov=libs --cov=services --cov-report=xml:coverage.xml --cov-report=term-missing
+            code=$?
+            set -e
+            if [ "$code" -ne 0 ] && [ "$code" -ne 5 ]; then
+              exit "$code"
+            fi
+          else
+            echo "pytest-cov is not in the workspace dev group. Python coverage is not collected."
+            echo "CU-01 does not edit pyproject.toml. No coverage percentage gate is configured."
+          fi
+
+      - name: Upload Python coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  contract-validation:
+    name: Contract schema validation
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Validate contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/validate_contracts.py ]; then
+            if [ -d contracts ] && find contracts -type f -print -quit | grep -q .; then
+              echo "Contract files exist but scripts/validate_contracts.py is missing."
+              exit 1
+            fi
+            echo "scripts/validate_contracts.py is not in the tree yet."
+            echo "Codex CX-01 owns that script. No contract files are present to validate."
+            exit 0
+          fi
+          uv run python scripts/validate_contracts.py
+
+  frontend:
+    name: Frontend lint, types, and tests
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || (needs.changes.outputs.workflow == 'true' && needs.changes.outputs.pnpm_workspace == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint and Prettier
+        run: pnpm --filter web lint
+
+      - name: TypeScript
+        run: pnpm --filter web exec tsc -b --pretty false
+
+      - name: Vitest with coverage
+        run: pnpm --filter web exec vitest run --coverage
+
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-coverage
+          path: web/coverage
+          if-no-files-found: warn
+
+  required:
+    name: Required checks
+    needs:
+      - changes
+      - lockfiles
+      - backend-lint
+      - backend-test
+      - contract-validation
+      - frontend
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail when a selected check failed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          LOCKFILES: ${{ needs.lockfiles.result }}
+          BACKEND_LINT: ${{ needs.backend-lint.result }}
+          BACKEND_TEST: ${{ needs.backend-test.result }}
+          CONTRACTS: ${{ needs.contract-validation.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for pair in \
+            "changes:${CHANGES}" \
+            "lockfiles:${LOCKFILES}" \
+            "backend-lint:${BACKEND_LINT}" \
+            "backend-test:${BACKEND_TEST}" \
+            "contract-validation:${CONTRACTS}" \
+            "frontend:${FRONTEND}"
+          do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            echo "${name}=${result}"
+            case "$result" in
+              success|skipped) ;;
+              *) fail=1 ;;
+            esac
+          done
+          exit "$fail"
