@@ -1,0 +1,30 @@
+
+# Retrace internal implementation plans
+/PLAN_CODEX.md
+/PLAN_CURSOR.md
+/PLAN_ANTIGRAVITY.md
+/INTEGRATION_TIMELINE.md
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# IDE and local files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
