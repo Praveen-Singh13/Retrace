@@ -1,0 +1,11 @@
+target-version = "py312"
+line-length = 100
+src = ["libs", "services"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
