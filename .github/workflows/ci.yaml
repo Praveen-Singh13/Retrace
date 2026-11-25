@@ -28,6 +28,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       contracts: ${{ steps.filter.outputs.contracts }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      pnpm_workspace: ${{ steps.filter.outputs.pnpm_workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,9 +64,15 @@ jobs:
           classify frontend '^(web/|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|\.nvmrc$)'
           classify contracts '^(contracts/|scripts/validate_contracts\.py$)'
           classify workflow '^\.github/workflows/'
+          if [ -f pnpm-workspace.yaml ]; then
+            echo "pnpm_workspace=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pnpm_workspace=false" >> "$GITHUB_OUTPUT"
+          fi
 
   lockfiles:
     name: Lockfile freshness
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -78,17 +85,20 @@ jobs:
         run: uv lock --check
 
       - name: Install pnpm
+        if: needs.changes.outputs.pnpm_workspace == 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 11.25.0
 
       - name: Setup Node
+        if: needs.changes.outputs.pnpm_workspace == 'true'
         uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
       - name: Check pnpm-lock.yaml
+        if: needs.changes.outputs.pnpm_workspace == 'true'
         run: pnpm install --frozen-lockfile
 
   backend-lint:
@@ -213,7 +223,7 @@ jobs:
   frontend:
     name: Frontend lint, types, and tests
     needs: changes
-    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflow == 'true'
+    if: needs.changes.outputs.frontend == 'true' || (needs.changes.outputs.workflow == 'true' && needs.changes.outputs.pnpm_workspace == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -264,6 +274,7 @@ jobs:
     steps:
       - name: Fail when a selected check failed
         env:
+          CHANGES: ${{ needs.changes.result }}
           LOCKFILES: ${{ needs.lockfiles.result }}
           BACKEND_LINT: ${{ needs.backend-lint.result }}
           BACKEND_TEST: ${{ needs.backend-test.result }}
@@ -274,6 +285,7 @@ jobs:
           set -euo pipefail
           fail=0
           for pair in \
+            "changes:${CHANGES}" \
             "lockfiles:${LOCKFILES}" \
             "backend-lint:${BACKEND_LINT}" \
             "backend-test:${BACKEND_TEST}" \
